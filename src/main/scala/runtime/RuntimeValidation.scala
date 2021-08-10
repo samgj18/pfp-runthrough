@@ -1,9 +1,13 @@
 package runtime
-import cats.data.ValidatedNel
+import cats.data.{EitherNel, ValidatedNel}
 import cats.implicits._
-import eu.timepit.refined.api.Refined
-import eu.timepit.refined.collection.NonEmpty
+import eu.timepit.refined.api.RefType.refinedRefType
+import eu.timepit.refined.api.{Refined, RefinedTypeOps, Validate}
+import eu.timepit.refined.collection.{Contains, NonEmpty}
+import eu.timepit.refined.refineV
 import eu.timepit.refined.types.string.NonEmptyString
+import io.estatico.newtype.macros._
+import runtime.NewtypeRefinedOps._
 
 object RuntimeValidation {
   // Almost every application needs to deal with runtime validation.
@@ -46,4 +50,91 @@ object RuntimeValidation {
   //    NonEmptyList(Predicate isEmpty() did not fail.,
   //    Predicate failed: (3 > 5).)
   //  )
+
+  // A similar result can be achieved via EitherNel + parMapN
+  def validateEither(a: String, b: Int): EitherNel[String, MyType] =
+    (
+      NonEmptyString.from(a).toEitherNel,
+      GTFive.from(b).toEitherNel
+    ).parMapN(MyType.apply)
+
+  // Left(
+  //   NonEmptyList(Predicate isEmpty() did not fail.,
+  //   Predicate failed: (3 > 5).)
+  // )
+
+}
+
+object PersonDomain {
+  type UserNameR = NonEmptyString
+  object UserNameR extends RefinedTypeOps[UserNameR, String]
+
+  type NameR = NonEmptyString
+  object NameR extends RefinedTypeOps[NameR, String]
+
+  type EmailR = String Refined Contains['@']
+  object EmailR extends RefinedTypeOps[EmailR, String]
+
+  @newtype case class UserName(value: UserNameR)
+  @newtype case class Name(value: NameR)
+  @newtype case class Email(value: EmailR)
+
+  case class Person(
+      username: UserName,
+      name: Name,
+      email: Email
+  )
+
+  // To perform validation, we will need an extra map to lift the refinement type
+  // into our @newtype, in addition to EitherNel:
+  def mkPerson(
+      u: String,
+      n: String,
+      e: String
+  ): EitherNel[String, Person] =
+    (
+      UserNameR.from(u).toEitherNel.map(UserName.apply),
+      NameR.from(n).toEitherNel.map(Name.apply),
+      EmailR.from(e).toEitherNel.map(Email.apply)
+    ).parMapN(Person.apply)
+
+  // This is a bit repetitive and comes with a little of boilerplate. The pattern can be abstracted using the Coercible typeclass
+  // fom the @newtype library:
+
+  def mkPersonCoercible(
+      u: String,
+      n: String,
+      e: String
+  ): EitherNel[String, Person] = {
+    (
+      validate[UserName](u),
+      validate[Name](n),
+      validate[Email](e)
+    ).parMapN(Person.apply)
+    /*
+      We could also make it work as an extension method of the raw value, though, this requires two method calls instead.
+      (
+        u.as[UserName].validate,
+        n.as[Name].validate,
+        e.as[Email].validate
+      ).parMapN(Person.apply)
+     */
+  }
+
+}
+
+object NewtypeRefinedOps {
+  import io.estatico.newtype.Coercible
+  import io.estatico.newtype.ops._
+
+  final class NewtypeRefinedPartiallyApplied[A] {
+    def apply[T, P](raw: T)(implicit
+        c: Coercible[Refined[T, P], A],
+        v: Validate[T, P]
+    ): EitherNel[String, A] =
+      refineV[P](raw).toEitherNel.map(_.coerce[A])
+  }
+
+  def validate[A]: NewtypeRefinedPartiallyApplied[A] =
+    new NewtypeRefinedPartiallyApplied[A]
 }
